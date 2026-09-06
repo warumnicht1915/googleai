@@ -1,0 +1,53 @@
+name: Release macOS app
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            arch: x86_64
+          - runner: macos-14
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+      - name: Build the app bundle
+        run: python scripts/build.py
+      - name: Package
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            dist/ImageSearch.app \
+            "ImageSearch-${GITHUB_REF_NAME}-macos-${{ matrix.arch }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ImageSearch-macos-${{ matrix.arch }}
+          path: ImageSearch-*.zip
+          if-no-files-found: error
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "ImageSearch $GITHUB_REF_NAME" --notes-file CHANGELOG.md
+          gh release upload "$GITHUB_REF_NAME" ImageSearch-*.zip --clobber

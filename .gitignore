@@ -1,0 +1,29 @@
+# Local runtimes / generated artifacts
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+release-assets/
+*.spec
+*.log
+.DS_Store
+# Private configuration and application data
+.env
+.env.*
+!.env.example
+*.sqlite*
+*.db
+*.db-*
+*.part
+app.lock
+browser/
+browser-cache/
+previews/
+downloads/
+qa-data/
+
+.build-stage
