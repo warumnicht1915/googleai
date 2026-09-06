@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "imagesearch-desktop"
-version = "1.1.0"
+version = "1.1.1"
 description = "A desktop Google image search and personal collection app"
 readme = "README.md"
 requires-python = ">=3.10"

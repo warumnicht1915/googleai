@@ -71,8 +71,10 @@ def pixmap(name: str, color: str, size: int = 18, fill: bool = False,
     return out
 
 
-def icon(name: str, color: str, size: int = 18, fill: bool = False, weight: float = 2.0) -> QIcon:
-    return QIcon(pixmap(name, color, size, fill, weight))
+def icon(name: str, color: str, size: int = 18, fill: bool = False,
+         weight: float = 2.0, angle: float = 0.0) -> QIcon:
+    """Same arguments as pixmap(); the spinner needs `angle`."""
+    return QIcon(pixmap(name, color, size, fill, weight, angle))
 
 
 def clear_cache():

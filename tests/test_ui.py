@@ -128,3 +128,30 @@ def test_a_tiny_source_is_not_stretched_into_mush(tmp_path):
     shown = card.picture.pixmap()
     assert shown.width() <= int(90 * 1.4) + 1 and shown.height() <= int(70 * 1.4) + 1
     window.close(); app.processEvents()
+
+
+def test_download_spinner_animates_without_raising(tmp_path):
+    """Qt swallows exceptions raised inside a slot, so drive the animation and watch excepthook."""
+    import sys
+    escaped = []
+    original = sys.excepthook
+    sys.excepthook = lambda *info: escaped.append(info)
+    try:
+        window, store, items = seeded(tmp_path)
+        card = window.cards[0]
+        card.start_spinner()
+        assert card.spinner is not None
+        for step in range(0, 960, 60):
+            card.spinner.setCurrentTime(step)
+            app.processEvents()
+        card.stop_spinner()
+        card.pop_saved()
+        card.animate_like(True)
+        card.animate_like(False)
+        card.fade_in()
+        for _ in range(6):
+            app.processEvents(); QTest.qWait(20)
+        window.close(); app.processEvents()
+    finally:
+        sys.excepthook = original
+    assert not escaped, escaped
