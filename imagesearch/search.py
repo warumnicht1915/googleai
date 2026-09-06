@@ -9,7 +9,7 @@ import os
 from urllib.parse import urlencode, urlparse, parse_qs
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal, Qt, QThreadPool
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineDownloadRequest
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 RESULT_CAP = 500
@@ -76,7 +76,9 @@ class GoogleSearch(QObject):
     more_results = Signal(list)
     status = Signal(str)
     busy = Signal(bool)
-    more_state = Signal(bool)  # True while another page may still be available
+    more_state = Signal(bool)   # True while another page may still be available
+    fetched = Signal(str, str)  # id, temporary path — pulled through Chromium
+    fetch_failed = Signal(str, str)
 
     POLL_MS = 750
     FIRST_DEADLINE_MS = 30000
@@ -125,6 +127,10 @@ class GoogleSearch(QObject):
         self.api_pool.setMaxThreadCount(2)
         self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self.browser_context_menu)
+        # A second, never-shown page used only to pull images that refuse plain HTTP.
+        self.fetch_page = QWebEnginePage(self.profile, self)
+        self.fetch_jobs = {}
+        self.profile.downloadRequested.connect(self.on_download_requested)
 
     # ---------- search lifecycle ----------
 
@@ -281,6 +287,50 @@ class GoogleSearch(QObject):
         # Page must be destroyed before its profile.
         self.view.setPage(QWebEnginePage(self.view))
         self.page.deleteLater()
+        self.fetch_page.deleteLater()
+
+    # ---------- last-resort fetch through Chromium ----------
+
+    def browser_fetch(self, ident: str, url: str, page_url: str, directory):
+        """Plain HTTP was refused. Chromium already holds this site's cookies, so ask it."""
+        if not url.startswith(('https://', 'http://')):
+            self.fetch_failed.emit(ident, '원본 이미지 주소가 없습니다.')
+            return
+        if ident in self.fetch_jobs:
+            return
+        self.fetch_jobs[ident] = {'url': url, 'directory': str(directory)}
+        # Giving the page the source document as its context makes Chromium send a
+        # Referer the host will accept, which is what most hotlink blocks check.
+        if page_url.startswith(('https://', 'http://')):
+            self.fetch_page.setHtml('<!doctype html><title>fetch</title>', QUrl(page_url))
+        self.fetch_page.download(QUrl(url))
+
+    def pending_fetch(self, url: str):
+        for ident, job in self.fetch_jobs.items():
+            if job['url'] == url:
+                return ident, job
+        return None, None
+
+    def on_download_requested(self, request):
+        ident, job = self.pending_fetch(request.url().toString())
+        if ident is None:
+            request.cancel()  # nothing in this app downloads through the browser by itself
+            return
+        request.setDownloadDirectory(job['directory'])
+        request.setDownloadFileName(f'{ident}.browser-part')
+        request.isFinishedChanged.connect(lambda r=request, i=ident: self.on_download_finished(r, i))
+        request.accept()
+
+    def on_download_finished(self, request, ident):
+        if not request.isFinished():
+            return
+        self.fetch_jobs.pop(ident, None)
+        completed = request.state() == QWebEngineDownloadRequest.DownloadState.DownloadCompleted
+        path = os.path.join(request.downloadDirectory(), request.downloadFileName())
+        if completed and os.path.exists(path):
+            self.fetched.emit(ident, path)
+        else:
+            self.fetch_failed.emit(ident, '원본 사이트가 브라우저 요청도 거부했습니다.')
 
     # ---------- settings and manual capture ----------
 

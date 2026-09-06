@@ -23,21 +23,59 @@ KEEP_ORIGINAL_BYTES = 1_600_000       # below this the original file is cached u
 Image.MAX_IMAGE_PIXELS = 50_000_000
 USER_AGENT = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
               '(KHTML, like Gecko) Chrome/125.0 Safari/537.36')
+BROWSER_HEADERS = {
+    'User-Agent': USER_AGENT,
+    'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Sec-Fetch-Dest': 'image',
+    'Sec-Fetch-Mode': 'no-cors',
+}
+# Hosts that serve images only to their own site. The value is the Referer they expect.
+REFERER_RULES = (
+    ('pximg.net', 'https://www.pixiv.net/'),
+    ('pixiv.net', 'https://www.pixiv.net/'),
+    ('twimg.com', 'https://twitter.com/'),
+    ('pinimg.com', 'https://www.pinterest.com/'),
+    ('wixmp.com', 'https://www.deviantart.com/'),
+    ('deviantart.net', 'https://www.deviantart.com/'),
+    ('artstation.com', 'https://www.artstation.com/'),
+    ('donmai.us', 'https://danbooru.donmai.us/'),
+    ('zerochan.net', 'https://www.zerochan.net/'),
+    ('nicovideo.jp', 'https://seiga.nicovideo.jp/'),
+    ('tumblr.com', 'https://www.tumblr.com/'),
+)
 
 
-def fetch_image(url: str, referer='', limit=MAX_BYTES, progress=None) -> tuple[bytes, str]:
-    if url.startswith('data:image/'):
-        header, payload = url.split(',', 1)
-        if ';base64' not in header or len(payload) > limit * 1.4:
-            raise ValueError('지원하지 않는 이미지 데이터입니다.')
-        data = base64.b64decode(payload, validate=True)
+class Refused(Exception):
+    """The host answered, but refused us. A different Referer may still work."""
+
+
+def referer_candidates(url: str, page_url: str = '') -> list[str]:
+    """Ordered Referer values to try. Hotlink protection almost always keys on this."""
+    host = (urlparse(url).hostname or '').lower()
+    candidates = [known for suffix, known in REFERER_RULES if host == suffix or host.endswith('.' + suffix)]
+    if page_url.startswith(('https://', 'http://')):
+        candidates.append(page_url)
+    parts = urlparse(url)
+    candidates.append(f'{parts.scheme}://{parts.netloc}/')
+    candidates.append('')  # some hosts refuse any cross-site Referer at all
+    return list(dict.fromkeys(candidates))
+
+
+def read_body(url: str, referer: str, limit: int, progress=None) -> bytes:
+    headers = dict(BROWSER_HEADERS)
+    if referer.startswith(('https://', 'http://')):
+        headers['Referer'] = referer
+        origin = urlparse(referer)
+        headers['Origin'] = f'{origin.scheme}://{origin.netloc}'
+        headers['Sec-Fetch-Site'] = 'same-site' if (urlparse(url).hostname or '').endswith(
+            '.'.join((origin.hostname or '').split('.')[-2:])) else 'cross-site'
     else:
-        if urlparse(url).scheme not in ('https', 'http'):
-            raise ValueError('HTTP/HTTPS 이미지 주소만 지원합니다.')
-        headers = {'User-Agent': USER_AGENT, 'Accept': 'image/avif,image/webp,image/*,*/*;q=0.8'}
-        if referer.startswith(('https://', 'http://')):
-            headers['Referer'] = referer
-        with requests.get(url, headers=headers, timeout=(8, 20), stream=True) as response:
+        headers['Sec-Fetch-Site'] = 'none'
+    try:
+        with requests.get(url, headers=headers, timeout=(8, 20), stream=True, allow_redirects=True) as response:
+            if response.status_code in (401, 403, 405, 406, 409, 418, 429, 451, 503):
+                raise Refused(f'HTTP {response.status_code}')
             response.raise_for_status()
             try:
                 expected = int(response.headers.get('Content-Length') or 0)
@@ -54,7 +92,30 @@ def fetch_image(url: str, referer='', limit=MAX_BYTES, progress=None) -> tuple[b
                 chunks.append(chunk)
                 if progress and expected:
                     progress(min(99, int(total * 100 / expected)))
-            data = b''.join(chunks)
+            return b''.join(chunks)
+    except requests.RequestException as exc:
+        raise Refused(str(exc)) from exc
+
+
+def fetch_image(url: str, referer='', limit=MAX_BYTES, progress=None) -> tuple[bytes, str]:
+    """Fetch one image, retrying with each plausible Referer before giving up."""
+    if url.startswith('data:image/'):
+        header, payload = url.split(',', 1)
+        if ';base64' not in header or len(payload) > limit * 1.4:
+            raise ValueError('지원하지 않는 이미지 데이터입니다.')
+        data = base64.b64decode(payload, validate=True)
+    else:
+        if urlparse(url).scheme not in ('https', 'http'):
+            raise ValueError('HTTP/HTTPS 이미지 주소만 지원합니다.')
+        data, refusal = None, None
+        for candidate in referer_candidates(url, referer):
+            try:
+                data = read_body(url, candidate, limit, progress)
+                break
+            except Refused as exc:
+                refusal = exc
+        if data is None:
+            raise refusal or Refused('이미지를 받지 못했습니다.')
     with warnings.catch_warnings():
         warnings.simplefilter('error', Image.DecompressionBombWarning)
         with Image.open(io.BytesIO(data)) as img:
@@ -110,9 +171,10 @@ def clear_siblings(directory: Path, ident: str, keep: Path):
 
 
 class Signals(QObject):
-    done = Signal(str, str, str)     # id, kind, path
-    error = Signal(str, str, str)    # id, kind, message
+    done = Signal(str, str, str)      # id, kind, path
+    error = Signal(str, str, str)     # id, kind, message
     progress = Signal(str, str, int)  # id, kind, percent
+    refused = Signal(str, str, str)   # id, kind, url — worth retrying through the browser
 
 
 class ImageJob(QRunnable):
@@ -148,10 +210,12 @@ class ImageJob(QRunnable):
                     error = exc
             raise error or ValueError('이미지 주소가 없습니다.')
         except Exception as exc:
-            message = str(exc)
-            if isinstance(exc, requests.RequestException):
-                message = '서버 연결 실패 또는 원본 사이트에서 접근을 거부했습니다.'
-            self.signals.error.emit(ident, self.kind, message)
+            if isinstance(exc, (Refused, requests.RequestException)):
+                # Every Referer was rejected. The in-app browser still has this site's
+                # cookies, so the window escalates there instead of giving up here.
+                self.signals.refused.emit(ident, self.kind, self.item.get('url', ''))
+                return
+            self.signals.error.emit(ident, self.kind, str(exc))
 
 
 class DerivePreviewJob(QRunnable):
@@ -173,3 +237,52 @@ class DerivePreviewJob(QRunnable):
             self.signals.done.emit(self.ident, 'preview', str(path))
         except Exception as exc:
             self.signals.error.emit(self.ident, 'preview', str(exc))
+
+
+class AdoptFileJob(QRunnable):
+    """Validate a file the browser downloaded and move it into the library."""
+
+    def __init__(self, ident: str, source_path: str, directory: Path, kind='download'):
+        super().__init__()
+        self.ident, self.source_path, self.directory, self.kind = ident, source_path, directory, kind
+        self.signals = Signals()
+
+    def run(self):
+        source = Path(self.source_path)
+        try:
+            data = source.read_bytes()
+            with warnings.catch_warnings():
+                warnings.simplefilter('error', Image.DecompressionBombWarning)
+                with Image.open(io.BytesIO(data)) as image:
+                    fmt = image.format
+                    image.verify()
+            ext = {'JPEG': 'jpg', 'PNG': 'png', 'WEBP': 'webp', 'GIF': 'gif',
+                   'AVIF': 'avif', 'BMP': 'bmp', 'TIFF': 'tiff'}.get(fmt)
+            if not ext:
+                raise ValueError('지원하지 않는 이미지 형식입니다.')
+            if self.kind == 'preview':
+                data, ext = make_preview(data, ext)
+            path = self.directory / f'{self.ident}.{ext}'
+            save_atomic(path, data)
+            clear_siblings(self.directory, self.ident, path)
+            self.signals.done.emit(self.ident, self.kind, str(path))
+        except Exception as exc:
+            self.signals.error.emit(self.ident, self.kind, str(exc))
+        finally:
+            source.unlink(missing_ok=True)
+
+
+def remove_files(*paths) -> int:
+    """Delete saved files, ignoring the ones already gone. Returns how many went away."""
+    removed = 0
+    for candidate in paths:
+        if not candidate:
+            continue
+        path = Path(candidate)
+        try:
+            if path.is_file():
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed

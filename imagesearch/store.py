@@ -137,6 +137,11 @@ class Store:
             self.db.execute('INSERT INTO searches(query) VALUES(?) ON CONFLICT(query) DO UPDATE SET searched_at=CURRENT_TIMESTAMP', (query,))
             self.db.execute('DELETE FROM searches WHERE query NOT IN (SELECT query FROM searches ORDER BY searched_at DESC,rowid DESC LIMIT 15)')
 
+    def forget(self, ident):
+        """Drop an image from the library entirely; category links cascade away."""
+        with self.db:
+            self.db.execute('DELETE FROM images WHERE id=?', (ident,))
+
     def setting(self, key, default=''):
         row = self.db.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
         return row[0] if row else default

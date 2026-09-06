@@ -20,14 +20,14 @@ from imagesearch.ui import Window
 
 OUT = Path('docs/images')
 SWATCHES = [
-    ((92, 78, 140), (196, 150, 190), '별빛 아래의 마법소녀 · 팬아트'),
-    ((36, 92, 108), (150, 208, 208), '해변 마을 배경 일러스트'),
-    ((132, 70, 74), (238, 172, 150), '노을빛 검사 캐릭터 디자인'),
-    ((58, 84, 62), (170, 214, 150), '숲의 정령 · 컨셉 아트'),
-    ((74, 68, 122), (176, 168, 232), '푸른 머리 아이돌 캐릭터'),
-    ((122, 96, 52), (232, 202, 138), '따뜻한 오후의 교실 배경'),
-    ((104, 58, 96), (216, 158, 200), '축제의 밤 · 유카타 일러스트'),
-    ((48, 62, 98), (146, 172, 226), '비 오는 거리의 소녀'),
+    ((92, 78, 140), (196, 150, 190), '미코토 · 밤거리 팬아트'),
+    ((36, 92, 108), (150, 208, 208), '미코토 여름 교복 일러스트'),
+    ((132, 70, 74), (238, 172, 150), '미코토 · 노을빛 일러스트'),
+    ((58, 84, 62), (170, 214, 150), '미코토 캐릭터 시트 · 컨셉'),
+    ((74, 68, 122), (176, 168, 232), '미코토 · 전격 이펙트 연습'),
+    ((122, 96, 52), (232, 202, 138), '미코토 사복 코디 러프'),
+    ((104, 58, 96), (216, 158, 200), '미코토 · 축제의 밤'),
+    ((48, 62, 98), (146, 172, 226), '미코토 · 비 오는 거리'),
 ]
 
 
@@ -71,14 +71,14 @@ def seed(store: Store, workspace: Path):
         store.update(item['id'], preview_path=str(preview))
         if index % 3 != 2:
             store.update(item['id'], liked=1)
-        if index % 4 == 0:
+        if index % 4 != 1:
             store.update(item['id'], download_path=str(preview))
         items.append(store.get(item['id']))
-    categories = [store.add_category(name) for name in ('캐릭터 디자인', '배경 참고', '색감 레퍼런스')]
+    categories = [store.add_category(name) for name in ('미코토', '포즈 참고', '색감 레퍼런스')]
     for index, item in enumerate(items):
         chosen = [categories[index % 3]] + ([categories[2]] if index % 2 == 0 else [])
         store.assign(item['id'], sorted(set(chosen)))
-    for query in ('마법소녀 일러스트', '애니메이션 배경', '캐릭터 컨셉 아트'):
+    for query in ('미코토 일러스트', '미사카 미코토 팬아트', '애니메이션 배경'):
         store.remember(query)
     return items
 
@@ -99,7 +99,7 @@ def main():
 
     items = seed(store, root)
     window.refresh_sidebar()
-    window.query = '마법소녀 일러스트'
+    window.query = '미코토 일러스트'
     window.receive_results(items)
     window.set_more_available(True)
     window.set_status('Google 이미지 8개를 찾았습니다. 아래로 스크롤하면 더 불러옵니다.')

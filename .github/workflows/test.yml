@@ -31,5 +31,6 @@ jobs:
       - run: python -m pytest -q
       - run: python scripts/verify_search.py
       - run: python scripts/verify_auto_search.py
+      - run: python scripts/verify_browser_fetch.py
       - name: Regenerate the documentation screenshots
         run: python scripts/capture_ui.py

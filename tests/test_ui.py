@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6.QtWidgets import QApplication, QCheckBox
@@ -155,3 +156,71 @@ def test_download_spinner_animates_without_raising(tmp_path):
     finally:
         sys.excepthook = original
     assert not escaped, escaped
+
+
+def saved_item(tmp_path, store, window, name='saved'):
+    original = tmp_path / f'{name}-original.png'
+    preview = tmp_path / f'{name}-preview.png'
+    Image.new('RGB', (900, 700), '#7788cc').save(original)
+    Image.new('RGB', (300, 240), '#7788cc').save(preview)
+    item = store.upsert({'url': f'https://example.com/{name}.png', 'title': f'{name} 이미지', 'source': 'example.com'})
+    store.update(item['id'], download_path=str(original), preview_path=str(preview), liked=1)
+    window.receive_results([store.get(item['id'])]); app.processEvents()
+    return store.get(item['id']), original, preview
+
+
+def test_deleting_a_download_keeps_the_rest_of_the_library(tmp_path):
+    store = Store(tmp_path / 'data')
+    window = Window(store, browser=False); window.show(); app.processEvents()
+    item, original, preview = saved_item(tmp_path, store, window)
+    card = window.cards[0]
+    assert card.trash.isVisible() and ' 저장됨' == card.download.text()
+
+    assert window.delete_download(item['id'], confirm=False) is True
+    assert not original.exists()
+    fresh = store.get(item['id'])
+    assert fresh['download_path'] == ''
+    assert fresh['liked'] == 1 and Path(fresh['preview_path']).exists()
+    app.processEvents()
+    assert not window.cards[0].trash.isVisible()
+    assert window.cards[0].download.text() == ' 저장'
+    assert not window.store.list_images('downloads')
+    window.close(); app.processEvents()
+
+
+def test_deleting_a_download_that_is_already_gone_repairs_the_row(tmp_path):
+    store = Store(tmp_path / 'data')
+    window = Window(store, browser=False); window.show(); app.processEvents()
+    item, original, _ = saved_item(tmp_path, store, window)
+    original.unlink()  # the user removed it in Finder
+    assert window.delete_download(item['id'], confirm=False) is False
+    assert store.get(item['id'])['download_path'] == ''
+    window.close(); app.processEvents()
+
+
+def test_forgetting_an_image_removes_its_files_and_row(tmp_path):
+    store = Store(tmp_path / 'data')
+    window = Window(store, browser=False); window.show(); app.processEvents()
+    item, original, preview = saved_item(tmp_path, store, window)
+    category = store.add_category('정리함'); store.assign(item['id'], [category])
+    window.refresh_sidebar()
+
+    assert window.forget_image(item['id'], confirm=False) is True
+    assert not original.exists() and not preview.exists()
+    assert store.get(item['id']) == {}
+    assert store.category_ids(item['id']) == set()
+    assert window.results == [] and window.cards == []
+    window.close(); app.processEvents()
+
+
+def test_a_refusal_without_a_browser_is_reported_not_retried(tmp_path):
+    store = Store(tmp_path / 'data')
+    window = Window(store, browser=False); window.show(); app.processEvents()
+    window.queue_image = lambda item, kind: None  # no real network from this test
+    item = store.upsert({'url': 'https://blocked.example/a.png', 'title': '차단', 'source': 'blocked.example'})
+    window.receive_results([store.get(item['id'])]); app.processEvents()
+    window.jobs[(item['id'], 'download')] = object()
+    window.image_refused(item['id'], 'download', 'https://blocked.example/a.png')
+    assert (item['id'], 'download') not in window.jobs
+    assert '거부' in window.status.text()
+    window.close(); app.processEvents()

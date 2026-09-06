@@ -50,3 +50,16 @@ def test_history_bounded(store):
     store.remember('21')
     assert len(store.history())==8 and store.history()[0]=='21'
     assert store.db.execute('SELECT COUNT(*) FROM searches').fetchone()[0]==15
+
+
+def test_forget_removes_the_row_and_its_category_links(store, item):
+    entry = store.upsert(item)
+    category = store.add_category('버릴 것')
+    store.assign(entry['id'], [category])
+    store.update(entry['id'], liked=1)
+    assert len(store.list_images('liked')) == 1
+    store.forget(entry['id'])
+    assert store.get(entry['id']) == {}
+    assert store.list_images('liked') == []
+    assert store.category_ids(entry['id']) == set()
+    assert store.categories()[0]['count'] == 0  # the category itself survives

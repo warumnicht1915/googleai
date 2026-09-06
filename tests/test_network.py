@@ -4,7 +4,9 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 from PIL import Image
-from imagesearch.network import fetch_image, make_preview, ImageJob, DerivePreviewJob, PREVIEW_EDGE
+from pathlib import Path
+from imagesearch.network import (fetch_image, make_preview, referer_candidates, remove_files,
+                                ImageJob, DerivePreviewJob, AdoptFileJob, PREVIEW_EDGE)
 
 
 def png(size=(160, 120), color='teal'):
@@ -114,3 +116,95 @@ def test_data_url():
 def test_non_http_rejected():
     with pytest.raises(ValueError):
         fetch_image('file:///etc/passwd')
+
+
+@pytest.fixture
+def picky():
+    """A host that serves the image only to a Referer from its own site."""
+    class Handler(BaseHTTPRequestHandler):
+        seen = []
+
+        def do_GET(self):
+            referer = self.headers.get('Referer', '')
+            Handler.seen.append(referer)
+            allowed = referer.startswith(f'http://127.0.0.1:{self.server.server_port}/')
+            if self.path == '/nobody':
+                allowed = referer == ''
+            if not allowed:
+                self.send_response(403); self.end_headers(); return
+            self.send_response(200); self.end_headers(); self.wfile.write(png())
+
+        def log_message(self, *args):
+            pass
+
+    Handler.seen = []
+    service = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=service.serve_forever, daemon=True); thread.start()
+    yield f'http://127.0.0.1:{service.server_port}', Handler
+    service.shutdown(); service.server_close()
+
+
+def test_referer_ladder_recovers_a_hotlink_block(picky):
+    """The page's Referer is refused; the image host's own origin is accepted."""
+    base, handler = picky
+    data, ext = fetch_image(base + '/art.png', referer='https://somewhere.example/post/1')
+    assert ext == 'png' and data == png()
+    assert handler.seen[0] == 'https://somewhere.example/post/1'
+    assert handler.seen[-1] == base + '/'
+
+
+def test_referer_ladder_falls_through_to_no_referer(picky):
+    base, handler = picky
+    data, ext = fetch_image(base + '/nobody', referer='https://somewhere.example/post/1')
+    assert ext == 'png' and data == png()
+    assert handler.seen[-1] == ''
+
+
+def test_known_hosts_get_the_referer_they_expect():
+    candidates = referer_candidates('https://i.pximg.net/img/78.png', 'https://www.pixiv.net/artworks/78')
+    assert candidates[0] == 'https://www.pixiv.net/'
+    assert '' in candidates and candidates[-1] == ''
+    plain = referer_candidates('https://cdn.example.com/a.png', 'https://blog.example/post')
+    assert plain[0] == 'https://blog.example/post'
+    assert 'https://cdn.example.com/' in plain
+
+
+def test_a_host_that_refuses_everything_asks_for_the_browser(server, tmp_path):
+    """A refusal is not a plain error: the window escalates it to the in-app browser."""
+    refused, failed = [], []
+    job = ImageJob({'id': 'blocked', 'url': server + '/denied', 'page_url': 'https://blog.example/p'},
+                   tmp_path, 'download')
+    job.signals.refused.connect(lambda ident, kind, url: refused.append((ident, kind, url)))
+    job.signals.error.connect(lambda *a: failed.append(a))
+    job.run()
+    assert refused == [('blocked', 'download', server + '/denied')]
+    assert not failed
+
+
+def test_adopting_a_browser_download(tmp_path):
+    staged = tmp_path / 'blocked.browser-part'
+    staged.write_bytes(big_jpeg((900, 700)))
+    out = tmp_path / 'downloads'; out.mkdir()
+    saved = []
+    job = AdoptFileJob('blocked', str(staged), out, 'download')
+    job.signals.done.connect(lambda ident, kind, path: saved.append(path))
+    job.run()
+    assert saved and Path(saved[0]).name == 'blocked.jpg'
+    assert not staged.exists()  # the temporary file is cleaned up either way
+
+
+def test_adopting_a_file_that_is_not_an_image_fails_cleanly(tmp_path):
+    staged = tmp_path / 'junk.browser-part'
+    staged.write_bytes(b'<html>blocked by cloudflare</html>')
+    out = tmp_path / 'downloads'; out.mkdir()
+    problems = []
+    job = AdoptFileJob('junk', str(staged), out)
+    job.signals.error.connect(lambda ident, kind, message: problems.append(message))
+    job.run()
+    assert problems and not list(out.iterdir()) and not staged.exists()
+
+
+def test_remove_files_ignores_what_is_already_gone(tmp_path):
+    present = tmp_path / 'a.png'; present.write_bytes(png())
+    assert remove_files(str(present), str(tmp_path / 'missing.png'), '', None) == 1
+    assert not present.exists()

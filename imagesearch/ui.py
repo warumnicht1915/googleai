@@ -11,8 +11,10 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect)
 from . import icons
 from .store import Store
-from .network import ImageJob, DerivePreviewJob
+from .network import ImageJob, DerivePreviewJob, AdoptFileJob, remove_files
 from .theme import build_style, palette, DEFAULT_MODE, PALETTES
+
+BROWSER_FETCH = object()  # placeholder job: the in-app browser is fetching this image
 
 CARD_IMAGE_H = 205
 CARD_H = 308
@@ -86,11 +88,38 @@ class Card(QFrame):
         self.like.setToolTip('좋아요 · 오프라인 미리보기 저장')
         self.download = button(' 저장', lambda: window.download_image(item['id']), 'small')
         self.download.setFixedHeight(31)
+        self.trash = button('', lambda: window.delete_download(item['id']), 'small')
+        self.trash.setFixedSize(36, 31); self.trash.setToolTip('저장한 원본 파일 삭제')
+        self.trash.hide()
         self.tag = button('', lambda: window.assign_categories(item['id']), 'small')
         self.tag.setFixedSize(36, 31); self.tag.setToolTip('카테고리로 정리')
-        row.addWidget(self.like); row.addWidget(self.download); row.addStretch(); row.addWidget(self.tag)
+        row.addWidget(self.like); row.addWidget(self.download); row.addWidget(self.trash)
+        row.addStretch(); row.addWidget(self.tag)
         layout.addLayout(row)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self.context_menu)
         self.refresh()
+
+    def context_menu(self, pos):
+        window = self.window
+        saved = bool(self.item['download_path'] and Path(self.item['download_path']).exists())
+        menu = QMenu(self)
+        open_file = menu.addAction('저장한 파일 열기') if saved else None
+        source = menu.addAction('원본 출처 열기')
+        menu.addSeparator()
+        drop_file = menu.addAction('다운로드 파일 삭제') if saved else None
+        forget = menu.addAction('라이브러리에서 제거')
+        chosen = menu.exec(self.mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen is open_file:
+            window.open_path(Path(self.item['download_path']))
+        elif chosen is source:
+            window.open_url(self.item['page_url'] or self.item['url'])
+        elif chosen is drop_file:
+            window.delete_download(self.item['id'])
+        elif chosen is forget:
+            window.forget_image(self.item['id'])
 
     # ---------- content ----------
 
@@ -110,6 +139,7 @@ class Card(QFrame):
         self.like.setIcon(icons.icon('heart', colors['like'] if liked else colors['muted'], 17, fill=liked))
         self.like.setIconSize(QSize(17, 17))
         self.tag.setIcon(icons.icon('tag', colors['muted'], 15)); self.tag.setIconSize(QSize(15, 15))
+        self.trash.setIcon(icons.icon('trash', colors['muted'], 15)); self.trash.setIconSize(QSize(15, 15))
         downloading = (self.item['id'], 'download') in self.window.jobs
         saved = bool(self.item['download_path'] and Path(self.item['download_path']).exists())
         if downloading:
@@ -121,6 +151,7 @@ class Card(QFrame):
                                              colors['ok'] if saved else colors['muted'], 15))
             self.download.setIconSize(QSize(15, 15))
         self.download.setEnabled(not downloading)
+        self.trash.setVisible(saved and not downloading)
         path = next((self.item[k] for k in ('download_path', 'preview_path')
                      if self.item[k] and Path(self.item[k]).exists()), '')
         if path:
@@ -268,6 +299,8 @@ class Window(QMainWindow):
             self.searcher.status.connect(self.set_status)
             self.searcher.busy.connect(self.set_busy)
             self.searcher.more_state.connect(self.set_more_available)
+            self.searcher.fetched.connect(self.browser_fetched)
+            self.searcher.fetch_failed.connect(self.browser_fetch_failed)
         self.build()
         self.apply_theme(self.mode, persist=False)
         self.refresh_sidebar(); self.navigate('search')
@@ -346,7 +379,7 @@ class Window(QMainWindow):
         self.empty_sub.setAlignment(Qt.AlignmentFlag.AlignCenter); self.empty_sub.setWordWrap(True)
         welcome.addWidget(self.empty_sub)
         self.chips = QWidget(); chips = QHBoxLayout(self.chips); chips.setSpacing(9)
-        for text in ['하츠네 미쿠', '스튜디오 지브리', '애니메이션 배경']:
+        for text in ['미코토', '미사카 미코토 팬아트', '애니메이션 배경']:
             chips.addWidget(button(text, lambda checked=False, q=text: self.start_search(q), 'chip'))
         welcome.addWidget(self.chips)
         self.stack.addWidget(self.empty)
@@ -615,7 +648,29 @@ class Window(QMainWindow):
         self.jobs[key] = job
         job.signals.done.connect(self.image_done)
         job.signals.error.connect(self.image_error)
+        job.signals.refused.connect(self.image_refused)
         self.pool.start(job)
+
+    def image_refused(self, ident, kind, url):
+        """Plain HTTP was refused everywhere. For a download, try the browser instead."""
+        self.jobs.pop((ident, kind), None)
+        item = self.store.get(ident)
+        if kind == 'download' and self.searcher and url:
+            self.jobs[(ident, kind)] = BROWSER_FETCH
+            self.set_status('원본 사이트가 직접 요청을 거부했습니다. 앱 안의 브라우저로 다시 시도합니다…')
+            self.searcher.browser_fetch(ident, url, item.get('page_url', ''), self.store.downloads)
+            return
+        self.image_error(ident, kind, '원본 사이트에서 접근을 거부했습니다.')
+
+    def browser_fetched(self, ident, path):
+        job = AdoptFileJob(ident, path, self.store.downloads, 'download')
+        self.jobs[(ident, 'download')] = job
+        job.signals.done.connect(self.image_done)
+        job.signals.error.connect(self.image_error)
+        self.pool.start(job)
+
+    def browser_fetch_failed(self, ident, message):
+        self.image_error(ident, 'download', message)
 
     def image_done(self, ident, kind, path):
         self.jobs.pop((ident, kind), None)
@@ -686,6 +741,61 @@ class Window(QMainWindow):
             if card.item['id'] == ident:
                 card.refresh()
         self.set_status('원본 이미지를 다운로드하고 있습니다…')
+
+    def delete_download(self, ident, confirm=True):
+        item = self.store.get(ident)
+        path = item.get('download_path', '')
+        if not (path and Path(path).exists()):
+            self.store.update(ident, download_path='')
+            self.set_status('삭제할 다운로드 파일이 없습니다.')
+            self.after_delete(ident)
+            return False
+        if confirm:
+            answer = QMessageBox.question(
+                self, '다운로드 삭제',
+                f'저장한 원본 파일을 삭제할까요?\n\n{Path(path).name}\n\n'
+                '좋아요와 카테고리, 미리보기는 그대로 남습니다.',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+        remove_files(path)
+        self.store.update(ident, download_path='')
+        self.set_status('다운로드 파일을 삭제했습니다. 필요하면 다시 저장할 수 있습니다.')
+        self.after_delete(ident)
+        return True
+
+    def forget_image(self, ident, confirm=True):
+        item = self.store.get(ident)
+        if not item:
+            return False
+        if confirm:
+            answer = QMessageBox.question(
+                self, '라이브러리에서 제거',
+                f'이 이미지를 라이브러리에서 완전히 지울까요?\n\n{item["title"]}\n\n'
+                '저장한 원본 파일과 미리보기, 좋아요, 카테고리 지정이 모두 사라집니다.',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+        remove_files(item.get('download_path'), item.get('preview_path'))
+        self.store.forget(ident)
+        self.results = [entry for entry in self.results if entry['id'] != ident]
+        self.set_status('라이브러리에서 제거했습니다.')
+        self.render()
+        self.refresh_sidebar()
+        return True
+
+    def after_delete(self, ident):
+        if self.view_name == 'downloads':
+            self.render()
+        else:
+            for card in self.cards:
+                if card.item['id'] == ident:
+                    card.refresh()
+        self.refresh_sidebar()
+        if self.detail_refresh:
+            self.detail_refresh()
 
     @staticmethod
     def clear_layout(layout):
@@ -799,7 +909,10 @@ class Window(QMainWindow):
         tag.setIcon(icons.icon('tag', self.colors['muted'], 16)); tag.setIconSize(QSize(16, 16))
         source = button('  원본 출처', lambda: self.open_url(item['page_url'] or item['url']))
         source.setIcon(icons.icon('external-link', self.colors['muted'], 16)); source.setIconSize(QSize(16, 16))
-        row.addWidget(like); row.addWidget(save); row.addWidget(tag); row.addStretch(); row.addWidget(source)
+        drop = button('  다운로드 삭제', lambda: self.delete_download(ident))
+        drop.setIcon(icons.icon('trash', self.colors['muted'], 16)); drop.setIconSize(QSize(16, 16))
+        row.addWidget(like); row.addWidget(save); row.addWidget(drop); row.addWidget(tag)
+        row.addStretch(); row.addWidget(source)
         layout.addLayout(row)
 
         def refresh():
@@ -808,6 +921,7 @@ class Window(QMainWindow):
             like.setText('  좋아요 취소' if liked else '  좋아요')
             like.setIcon(icons.icon('heart', self.colors['like'] if liked else self.colors['muted'], 16, fill=liked))
             like.setIconSize(QSize(16, 16))
+            drop.setVisible(bool(current['download_path'] and Path(current['download_path']).exists()))
             path = next((current[k] for k in ('download_path', 'preview_path')
                          if current[k] and Path(current[k]).exists()), '')
             loaded = QPixmap(path) if path else QPixmap()
